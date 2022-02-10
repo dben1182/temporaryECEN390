@@ -27,6 +27,8 @@
 
 #define INDEX_OFFSET 1
 
+#define OLDEST_VALUE_INDEX 0
+
 
 static queue_t xQueue;
 const static queue_size_t xQueue_size = X_QUEUE_SIZE;
@@ -54,12 +56,18 @@ char outputQueueNames[OUTPUT_QUEUE_NAME_LENGTH] = "outputQueue_";
 
 double currentPowerValue[NUM_IIR_FILTERS];
 double previousPowerValue[NUM_IIR_FILTERS];
-double oldestValueLastUsed[NUM_IIR_FILTERS];
+double oldestValue[NUM_IIR_FILTERS];
+
 
 //function that initializes arrays that store the power values that will 
 //be subtracted for the next iterations's calculation. Initializes them
 //all to zero
 void init_powerQueues();
+void init_xQueue();
+void init_yQueue();
+void init_zQueues();
+void init_outputQueues();
+
 
 //function called at the start that initializes each of queues by calling
 //their own respective initialization functions
@@ -67,8 +75,8 @@ void filter_init()
 {
   init_yQueue();
   init_xQueue();
-  init_z_queues();
-  init_output_queues();
+  init_zQueues();
+  init_outputQueues();
 }
 
 //function that initializes the xQueue function by calling the queue_init function
@@ -95,7 +103,7 @@ void init_yQueue()
   }
 }
 
-void init_z_queues()
+void init_zQueues()
 {
   //iterates through each of the ten seperate z queues and initialize each
   //of those respective slots to zeros
@@ -114,7 +122,7 @@ void init_z_queues()
 
 
 
-void init_output_queues()
+void init_outputQueues()
 {
   //iterates through each of the 10 output queues to initialize them
   for(uint16_t i = FOR_LOOP_START_VALUE; i < NUM_OUTPUT_QUEUES; i++)
@@ -151,27 +159,162 @@ double filter_firFilter()
   double y_sum = INITIAL_SUM_VALUE;
   for(uint16_t k = FOR_LOOP_START_VALUE; k < xQueue_size; k++)
   {
-    y_sum = y_sum + firCoefficients[i]*queue_readElementAt(&xQueue, xQueue_size - INDEX_OFFSET - k);
+    y_sum = y_sum + firCoefficients[k]*queue_readElementAt(&xQueue, xQueue_size - INDEX_OFFSET - k);
   }
   queue_overwritePush(&yQueue, y_sum);
   return y_sum;
 }
 
-double filter_iirFilter()(uint16_t filterNumber)
+double filter_iirFilter(uint16_t filterNumber)
 {
   double b_and_y_sum = INITIAL_SUM_VALUE;
   double a_and_z_sum = INITIAL_SUM_VALUE;
   for(uint16_t k = FOR_LOOP_START_VALUE; k < yQueue_size; k++)
   {
-    b_and_y_sum = b_and_y_sum + iirBCoefficientConstants[filterNumber]*queue_readElementAt(&yQueue, yQueue_size - INDEX_OFFSET - k);
+    b_and_y_sum = b_and_y_sum + (iirBCoefficientConstants[filterNumber][k])*(queue_readElementAt(&yQueue, yQueue_size - INDEX_OFFSET - k));
   }
   for(uint16_t k = FOR_LOOP_START_VALUE; k < zQueue_size; k++)
   {
-    a_and_z_sum = a_and_z_sum + iirACoefficientConstants[filterNumber]*queue_readElementAt(&zQueues[filterNumber], zQueue_size - INDEX_OFFSET - k);
+    a_and_z_sum = a_and_z_sum + iirACoefficientConstants[filterNumber][k]*queue_readElementAt(&zQueues[filterNumber], zQueue_size - INDEX_OFFSET - k);
   }
 
-  double filter_sum
+  double filter_sum = b_and_y_sum - a_and_z_sum;
+  queue_overwritePush(&zQueues[filterNumber], filter_sum);
+  queue_overwritePush(&outputQueues[filterNumber], filter_sum);
+
+  return filter_sum;
 }
+
+
+
+
+double filter_computePower(uint16_t filterNumber, bool forceComputeFromScratch, bool debugPrint)
+{
+    double computedPower = 0.0;
+
+    if(forceComputeFromScratch)
+    {
+        double signalValue = 0;
+        for(uint16_t i = FOR_LOOP_START_VALUE; i < outputQueue_size; i++)
+        {
+            signalValue = queue_readElementAt(&outputQueues[filterNumber], i);
+            computedPower = computedPower + signalValue*signalValue;
+        }
+    }
+    else
+    {
+        double previousPower = previousPowerValue[filterNumber];
+        double oldest = oldestValue[filterNumber];
+        double newest = queue_readElementAt(&outputQueues[filterNumber], outputQueue_size - INDEX_OFFSET);
+
+        computedPower = previousPower - (oldest*oldest) + (newest*newest);
+    }
+
+    previousPowerValue[filterNumber] = computedPower;
+    currentPowerValue[filterNumber] = computedPower;
+    oldestValue[filterNumber] = queue_readElementAt(&outputQueues[filterNumber], OLDEST_VALUE_INDEX);
+    return computedPower;
+}
+
+double filter_getCurrentPowerValue(uint16_t filterNumber)
+{
+    return currentPowerValue[filterNumber];
+}
+
+void filter_getCurrentPowerValues(double powerValues[])
+{
+    for(uint16_t i = FOR_LOOP_START_VALUE; i < NUM_IIR_FILTERS; i++)
+    {
+        powerValues[i] = currentPowerValue[i];
+    }
+}
+
+
+
+void filter_getNormalizedPowerValues(double normalizedArray[], uint16_t *indexOfMaxValue)
+{
+    double maxValue = 0.0;
+    for(uint16_t i = FOR_LOOP_START_VALUE; i < NUM_IIR_FILTERS; i++)
+    {
+        if(currentPowerValue[i] > maxValue)
+        {
+            maxValue = currentPowerValue[i];
+            *indexOfMaxValue = i;
+        }
+    }
+
+    for(uint16_t i = FOR_LOOP_START_VALUE; i < NUM_IIR_FILTERS; i++)
+    {
+        normalizedArray[i] = (currentPowerValue[i] / maxValue);
+    }    
+}
+
+
+
+
+
+const double *filter_getFirCoefficientArray()
+{
+    return firCoefficients;
+}
+
+uint32_t filter_getFirCoefficientCount()
+{
+    return FIR_FILTER_TAP_COUNT;
+}
+
+const double *filter_getIirACoefficientArray(uint16_t filterNumber)
+{
+    return iirACoefficientConstants[filterNumber];
+}
+
+uint32_t filter_getIirACoefficientCount()
+{
+    return IIR_A_COEFFICIENT_COUNT;
+}
+
+const double *filter_getIirBCoefficientArray(uint16_t filterNumber)
+{
+    return iirBCoefficientConstants[filterNumber];
+}
+
+uint32_t filter_getIirBCoefficientCount()
+{
+    return IIR_B_COEFFICIENT_COUNT;
+}
+
+uint32_t filter_getYQueueSize()
+{
+    return yQueue_size;
+}
+
+uint16_t filter_getDecimationValue()
+{
+    return DECIMATION_VALUE;
+}
+
+queue_t *filter_getXQueue()
+{
+    return &xQueue;
+}
+
+queue_t *filter_getYQueue()
+{
+    return &yQueue;
+}
+
+queue_t *filter_getZQueue(uint16_t filterNumber)
+{
+    return &zQueues[filterNumber];
+}
+
+queue_t *filter_getIirOutputQueue(uint16_t filterNumber)
+{
+    return &outputQueues[filterNumber];
+}
+
+
+
 
 
 
@@ -185,8 +328,6 @@ void init_powerQueues()
   //each IIR Filter
   for(uint16_t i = FOR_LOOP_START_VALUE; i < NUM_IIR_FILTERS; i++)
   {
-    currentPowerValue[i] = INITIAL_POWER_VALUES;
     previousPowerValue[i] = INITIAL_POWER_VALUES;
-    oldestValueLastUsed[i] = INITIAL_POWER_VALUES;
   }
 }
