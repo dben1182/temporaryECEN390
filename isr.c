@@ -10,18 +10,21 @@
 #include <stdio.h>
 
 #include "detector.h"
-#include "hitLedTimer.h"
 #include "interrupts.h"
 #include "lockoutTimer.h"
 #include "transmitter.h"
 #include "trigger.h"
 
+//change this back to original after testing 100000
 #define ADC_BUFFER_SIZE 100000
 #define INDEX_IN_INITIAL_VALUE 0
 #define INDEX_OUT_INITIAL_VALUE 0
 #define ELEMENT_COUNT_INITIAL_VALUE 0
 #define INDEX_OUT_OFFSET 1
 #define INDEX_IN_OFFSET 1
+
+#define ADC_QUEUE_EMPTY_RETURN 0
+#define POPPED_REPLACEMENT 0
 
 #define FOR_LOOP_START_VALUE 0
 #define BUFFER_INITIAL_VALUE 0
@@ -35,6 +38,15 @@ typedef struct {
   uint32_t elementCount;          // Number of elements in the buffer.
   uint32_t data[ADC_BUFFER_SIZE]; // Values are stored here.
 } adcBuffer_t;
+
+
+//index Out refers to the index corresponding to the oldest value in the queue
+//i.e. index out will be some number and the data array at that index number will
+//be the oldest data value in the array
+
+//index In refers to the index corresponding to the index that is one past the newest
+//value. i.e., if the index of the newest value is 6, the value of indexIn will be 7
+//if there are no elements in the queue, indexIn will be the same number as indexOut
 
 // This is the instantiation of adcBuffer.
 volatile static adcBuffer_t adcBuffer;
@@ -70,64 +82,92 @@ void isr_function() {
 // This adds data to the ADC queue. Data are removed from this queue and used by
 // the detector.
 // owerwrite push
-void isr_addDataToAdcBuffer(uint32_t adcData) {
-  // case the queue is full. we change index out.
-  // otherwise, index out stays in the same exact place
-  if ((adcBuffer.indexIn + INDEX_IN_OFFSET) % ADC_BUFFER_SIZE == adcBuffer.indexOut) 
+void isr_addDataToAdcBuffer(uint32_t adcData) 
+{
+  //case the queue is full, so we call the removeDataFromAdcBuffer function
+  //before we go on to add the new adc data
+  if(((adcBuffer.indexIn + INDEX_IN_OFFSET) % ADC_BUFFER_SIZE) == adcBuffer.indexOut)
   {
-    adcBuffer.indexOut = (adcBuffer.indexOut + INDEX_OUT_OFFSET) % ADC_BUFFER_SIZE;
-    // element Count is decremented to account for the queue being full
-    // and then incremented later
-    (adcBuffer.elementCount)--;
+    isr_removeDataFromAdcBuffer();
   }
-  // writes new data to the former indexIn index
+  //we write adcData to indexIn, which will later be incremented to one past
+  //this current location
   adcBuffer.data[adcBuffer.indexIn] = adcData;
-  // increment element Count
+  //increment the element count. (This cancels out the decrement if we popped
+  //before adding this new data in)
   (adcBuffer.elementCount)++;
-  // updates indexIn to be an increase of one, with a wraparound
-  // possible check
+
+  //updates indexIn to be one past its original location with also a
+  //wraparound check
   adcBuffer.indexIn = (adcBuffer.indexIn + INDEX_IN_OFFSET) % ADC_BUFFER_SIZE;
 }
 
 // This removes a value from the ADC buffer.
-// pop function
-uint32_t isr_removeDataFromAdcBuffer() {
-  // case the adc queue is empty, and we return a zero
-  if (adcQueueIsEmpty()) {
-    return 0;
+// this removes the oldest value from the buffer,
+//which corresponds to the indexOut variable.
+//if there is no data in the queue, this function
+//returns zero, and does nothing else
+uint32_t isr_removeDataFromAdcBuffer() 
+{
+  //case the adcQueue is empty, and we return zero and 
+  //we do nothing else
+  if(adcQueueIsEmpty())
+  {
+    return ADC_QUEUE_EMPTY_RETURN;
   }
-  // otherwise, we do the popping and return the value
-  else {
-    uint32_t temp = adcBuffer.data[adcBuffer.indexOut];
-    // replaces popped value with a zero value
-    adcBuffer.data[adcBuffer.indexOut] = 0;
+  //case the adcQueue is NOT empty. We set the data value at the oldest slot
+  //to zero for convenience. We increment indexOut by one, taking
+  //into account the wraparound from the highest value back to the lowest
+  //we decrement the number of elements
+  else
+  {
+    //temporary variable that stores the data at the popped point
+    //stores it for use later to be returned later
+    uint32_t oldData = adcBuffer.data[adcBuffer.indexOut];
+    //replaces the data at that point with zero
+    adcBuffer.data[adcBuffer.indexOut] = POPPED_REPLACEMENT;
+    //increments index Out taking into account the wraparound
     adcBuffer.indexOut = (adcBuffer.indexOut + INDEX_OUT_OFFSET) % ADC_BUFFER_SIZE;
     //decrements the number of elements in the queue by 1
     (adcBuffer.elementCount)--;
-    return temp;
+    return oldData;
   }
 }
 
 // This returns the number of values in the ADC buffer.
-uint32_t isr_adcBufferElementCount() { return adcBuffer.elementCount; }
+uint32_t isr_adcBufferElementCount() 
+{ 
+  return adcBuffer.elementCount;
+}
 
-void adcBufferInit() {
-  adcBuffer.indexIn = INDEX_IN_INITIAL_VALUE;
+void adcBufferInit() 
+{
+  //sets indexOut to zero
   adcBuffer.indexOut = INDEX_OUT_INITIAL_VALUE;
+  //sets indexIn to zero
+  adcBuffer.indexIn = INDEX_IN_INITIAL_VALUE;
+  //sets number of elements to zero
   adcBuffer.elementCount = ELEMENT_COUNT_INITIAL_VALUE;
-
-  // initializes each value in data with zeros to begin with
-
-  for (uint32_t i = FOR_LOOP_START_VALUE; i < ADC_BUFFER_SIZE; i++) {
+  //iterates through each slot in the data array, and initializes
+  //those values to be zero. 
+  for(uint32_t i = FOR_LOOP_START_VALUE; i < ADC_BUFFER_SIZE; i++)
+  {
     adcBuffer.data[i] = BUFFER_INITIAL_VALUE;
   }
 }
 
 // returns whether the adc Queue is empty
-bool adcQueueIsEmpty() { return (adcBuffer.indexOut == adcBuffer.indexIn); }
+//it knows this by seeing if indexOut and indexIn
+//are equal to each other, that they are at the 
+//same value
+bool adcQueueIsEmpty() 
+{  
+  return (adcBuffer.indexOut == adcBuffer.indexIn);
+}
 
 // our test function for the adc Queue
-void adcTest() {
+void adcTest() 
+{
   adcBufferInit();
   // iterates through 100 different times just to check the performance of the
   // circular queue
@@ -142,4 +182,12 @@ void adcTest() {
     printf("garbage value: %d", adcBuffer.data[adcBuffer.indexIn]);
     printf("\n");
   }
+  isr_removeDataFromAdcBuffer();
+  for(uint8_t i = 0; i < 10; i++)
+  {
+    printf("%d, ", adcBuffer.data[i]);
+  }
+    printf("garbage value: %d", adcBuffer.data[adcBuffer.indexIn]);
+    printf(" element count: %d", adcBuffer.elementCount);
+    printf("\n"); 
 }

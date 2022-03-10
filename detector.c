@@ -6,6 +6,22 @@
 
 #include <stdio.h>
 
+#define DECIMATION_COUNTER_INITIAL_VALUE 0
+#define DECIMATION_COUNTER_MAX 9
+
+#define MAX_VALUE_INDEX 9
+
+#define FOR_LOOP_START_VALUE 0
+
+#define SORT_FOR_LOOP_START 1
+#define SORT_MOVING_OFFSET 1
+
+#define MEDIAN_INDEX_VALUE 4
+
+#define HIT_ARRAY_INITIAL_VALUE 0
+
+#define NUM_FREQUENCIES 10
+
 // Set to 1000 for M3T3, will need to be lowered later for increased range
 #define FUDGE_FACTOR 1000
 
@@ -21,24 +37,39 @@ uint16_t detector_hitArray[10];
 uint16_t lastChannelHit;
 static bool channelHitInitialized;
 
-static bool hitDetected;
+//flag used to determine if a hit has been detected
+static bool detector_hitDetectedFlag;
+
+//resets Decimation Counter to zero
+void resetDecimationCounter();
+
+//increments decimation counter by 1
+void incrementDecimationCounter();
+
+//returns whether decimation counter is complete
+bool decimationCounterComplete();
+
 
 // Always have to init things.
 // bool array is indexed by frequency number, array location set for true to
 // ignore, false otherwise. This way you can ignore multiple frequencies.
-void detector_init(bool ignoredFrequencies[]) {
+void detector_init(bool ignoredFrequencies[]) 
+{
   filter_init();
-  lockoutTimer_init();
-  hitLedTimer_init();
-  decimationCounter = 0;
-  // iterates through each value in the frequencies to ignore specific
-  // frequencies
-  for (uint16_t i = 0; i < 10; i++) {
+  //may need to call lockoutTimer_init and hitLedTimer_init here. But I don't think so
+  //resets DecimationCounter to zero
+  resetDecimationCounter();
+
+  //iterates through each value in the frequencies to ignore specific frequencies
+  //also sets the detector_hitArray to all zeros
+  for(uint16_t i = FOR_LOOP_START_VALUE; i < NUM_FREQUENCIES; i++)
+  {
     detectorIgnoredFrequencies[i] = ignoredFrequencies[i];
-    detector_hitArray[i] = 0;
+    detector_hitArray[i] = HIT_ARRAY_INITIAL_VALUE;
   }
-  hitDetected = false;
+  detector_hitDetectedFlag = false;
   channelHitInitialized = false;
+
 }
 
 // Runs the entire detector: decimating fir-filter, iir-filters,
@@ -51,86 +82,151 @@ void detector_init(bool ignoredFrequencies[]) {
 // 3. re-enable interrupts if interruptsNotEnabled was true.
 // if ignoreSelf == true, ignore hits that are detected on your frequency.
 // Your frequency is simply the frequency indicated by the slide switches
-void detector(bool interruptsCurrentlyEnabled) {
+void detector(bool interruptsCurrentlyEnabled) 
+{
+  //helper variable used to store the raw adc value which is between 0 and 4095
   uint32_t rawADCValue;
-  // check if interrupts currently enabled; if so, pause them, collect value,
-  // then resume. if not, then just collect the value.
-  if (interruptsCurrentlyEnabled) {
-    interrupts_disableArmInts();
-    rawADCValue = isr_removeDataFromAdcBuffer();
-    interrupts_enableArmInts();
-  } else {
-    rawADCValue = isr_removeDataFromAdcBuffer();
-  }
-  // scale adc value linearly between -1 and 1 (started as 0 to 4095)
-  // check that the division automatically casts to float
-  double scaledADCValue = (rawADCValue / RAW_ADC_SCALING) - 1;
-  // printf("raw value: %d, ", rawADCValue);
-  // printf("scaled value: %f\n", scaledADCValue);
+  //helper variable that stores the number of elements in the buffer
+  uint32_t elementCount = isr_adcBufferElementCount();
+  //helper variable that stores the scaled ADC value
+  double scaledADCValue;
 
-  // add adc value to filter
-  filter_addNewInput(scaledADCValue);
-
-  // only run the filters every 10th new value (decimation)
-  // run the FIR filter, IIR filter and power computation for all 10 channels
-  if (decimationCounter == 9) {
-
-    // run FIR filter
-    filter_firFilter();
-
-    // could only run iir filter for values not being ignored?
-    for (uint16_t i = 0; i < 10; i++) {
-      // run iir filter for each individual frequency
-      filter_iirFilter(i);
-    }
-
-    // could only run iir filter for values not being ignored?
-    for (uint16_t i = 0; i < 10; i++) {
-      // when will we need to run forceComputeFromScratch?
-      filter_computePower(i, false, false);
-    }
-
-    // If you detect a hit and the frequency with maximum power is not an
-    // ignored frequency (see detector_init):
-    //only will check if the lockout timer is not running. Otherwise,
-    //we don't check until the time is up
-
-  
-    if (detector_hitDetected()) 
+  //as per the instructions, we do the following steps the same number of times
+  //as there are elements left in the ADC queue
+  for(uint32_t i = FOR_LOOP_START_VALUE; i < elementCount; i++)
+  {
+    //case the ARM interrupts are currently enabled, in which case, we disable them
+    //before proceeding to pop the oldest data value from the queue and storing it
+    //in the variable rawADCValue. Then we re-enable the interrupts
+    if(interruptsCurrentlyEnabled)
     {
+      interrupts_disableArmInts();
+      rawADCValue = isr_removeDataFromAdcBuffer();
+      interrupts_enableArmInts();
+    }
+    //otherwise, if the interrupts are not enabled, we just pop it and continue
+    else
+    {
+      rawADCValue = isr_removeDataFromAdcBuffer();
+    }
+
+    //scales the RAW ADC value by dividing it by 2047.5 and then subtracting 1
+    //so we end up with values between -1 and 1
+    scaledADCValue = (rawADCValue / RAW_ADC_SCALING) - 1;
+ 
+
+    //we add the newly calculated scaledADCValue to the filter queue
+    filter_addNewInput(scaledADCValue);
     
-      //-start the lockoutTimer.
-      lockoutTimer_start();
-
-      //-start the hitLedTimer.
-      hitLedTimer_start();
-
-      //-increment detector_hitArray at the index of the frequency of the
-      // IIR-filter output where you detected the hit. Note that
-      // detector_hitArray is a 10-element integer array that simply holds the
-      // current number of hits, for each frequency, that have occurred to this
-      // point.
-
-      // set detector_hitDetectedFlag to true.
-      hitDetected = true;
-    } 
-    else 
+    //case the decimation counter is complete, and we do all the other code
+    //and call all the filter functions. at the end, we reset the counter
+    if(decimationCounterComplete())
     {
-      hitDetected = false; 
-      // if no hit detected, then set this to false? Need to think
-      // about how long hit detections are supposed to last -- do we
-      // run hitDetected() immediately after checking,
-      // or will resetting it to false after 10 ticks stop us from
-      // realizing it happened?
-    }
-  
+      //runs the FIR filter
+      filter_firFilter();
 
-    // resets decimation counter to zero so we can keep timing for decimation
-    decimationCounter = 0;
-  }
-  // otherwise, if it is not the tenth count, we increment the count
-  else {
-    decimationCounter++;
+      //iterates through and runs each of the IIR Filters
+      for(uint16_t j = FOR_LOOP_START_VALUE; j < NUM_FREQUENCIES; j++)
+      {
+        filter_iirFilter(j);
+      }
+
+      //iterates through and runs each of the compute power functions
+      for(uint16_t j = FOR_LOOP_START_VALUE; j < NUM_FREQUENCIES; j++)
+      {
+        filter_computePower(j, false, false);
+      }
+
+      //case the lockoutTimer is not running, so we look for another hit
+      if(!lockoutTimer_running())
+      {
+        //creates a length ten array of doubles to store the current
+        //power values
+        double currentPowerValues[NUM_FREQUENCIES];
+
+        //creates an array that will correspond to the indecies of the sorted
+        //current power values array
+        uint16_t channelIndexArray[NUM_FREQUENCIES];
+        
+        //iterates through for each filter and stores the power values in the
+        //current power values array. Also populates the channel index array
+        //with all the player numbers
+        for(uint16_t j = FOR_LOOP_START_VALUE; j < NUM_FREQUENCIES; j++)
+        {
+          currentPowerValues[j] = filter_getCurrentPowerValue(j);
+          channelIndexArray[j] = j;
+        }
+        
+        //insertion sort Algorithm
+
+        //does the inside loop 10 times for each of the possible elements
+        for(uint16_t j = SORT_FOR_LOOP_START; j < NUM_FREQUENCIES; j++)
+        {
+          //moves a single value to its correct relative position
+          for(uint16_t k = SORT_FOR_LOOP_START; k < NUM_FREQUENCIES; k++)
+          {
+            //case the value at k is less than the value at k-1. so, we switch them
+             if(currentPowerValues[k - SORT_MOVING_OFFSET] > currentPowerValues[k])
+             {
+               //this block of code will move the value that was at k - 1 to the k index
+               //and move the one that was at the k index to the k - 1 index, if the
+               //above condition is true
+               double temp = currentPowerValues[k];
+               currentPowerValues[k] = currentPowerValues[k - SORT_MOVING_OFFSET];
+               currentPowerValues[k - SORT_MOVING_OFFSET] = temp;
+
+               //mirrors the above block by also sorting the index array accordingly
+               //so we can keep track of who is who
+               uint16_t tempInt = channelIndexArray[k];
+               channelIndexArray[k] = channelIndexArray[k - SORT_MOVING_OFFSET];
+               channelIndexArray[k - SORT_MOVING_OFFSET] = tempInt;
+             }
+          }
+        }
+
+
+        //median value is now the 5th element (index 4) of the currentPowerValues array
+        double medianValue = currentPowerValues[MEDIAN_INDEX_VALUE];
+
+        //multiply the medianValue by the Fudge Factor to get the threshold value
+        double thresholdValue = medianValue*FUDGE_FACTOR;
+
+        //the maxValue is the last element of the current Power Values array,
+        //which is currentPowerValues[9]
+        double maxValue = currentPowerValues[MAX_VALUE_INDEX];
+
+        //compares to see if the maxValue is greater than the threshold value. If true
+        //then we set the flags to true, start the lockout and led timers
+        if(maxValue > thresholdValue)
+        {
+          
+          //sets the lastChannelHit variable to the index of the highest power channel
+          lastChannelHit = channelIndexArray[MAX_VALUE_INDEX];
+          //increments the number of hits, for that specified channel, by 1
+          (detector_hitArray[lastChannelHit])++;
+          //starts lockout timer so that we don't do any more checking for a hit
+          //for the next 2000 milliseconds
+          lockoutTimer_start();
+          //starts the timer for the hit led, which will illiminate the led
+          //hitLedTimer_start();
+
+          //sets the hit detected flag to true
+          detector_hitDetectedFlag = true;
+        }
+        //otherwise, we set the hitDetectedFlag to false
+        else
+        {
+          detector_hitDetectedFlag = false;
+        }
+      }
+
+      resetDecimationCounter();
+    }
+    //case the decimation counter is not complete, and we just increment the counter
+    else
+    {
+      incrementDecimationCounter();
+    }
   }
 }
 
@@ -140,77 +236,22 @@ void detector(bool interruptsCurrentlyEnabled) {
 // likely won't register as hit.
 // Returns true if a hit was detected and if the frequency in question was not
 // an ignored frequency
-bool detector_hitDetected() {
-  double currentPowerVals[10];
-  // get filter values for all 10 power values
-  for (uint16_t i = 0; i < 10; i++) {
-    currentPowerVals[i] = filter_getCurrentPowerValue(i);
-  }
-
-  // stores the array indices for the currentPowerVals array
-  uint16_t channelIndexArray[10] = {0, 1, 2, 3, 4, 5, 6, 7, 8, 9};
-
-  // insertion sort - may need to swap indexes around instead?
-  for (uint16_t i = 1; i < 10; i++) {
-    for (uint16_t j = 1; j < 10; j++) {
-      if (currentPowerVals[j - 1] > currentPowerVals[j]) {
-
-        double temp = currentPowerVals[j];
-        currentPowerVals[j] = currentPowerVals[j - 1];
-        currentPowerVals[j - 1] = temp;
-
-        // mirror channelIndexArray with currentPowerVals, so that all swaps are
-        // done on both
-        int tempInt = channelIndexArray[j];
-        channelIndexArray[j] = channelIndexArray[j - 1];
-        channelIndexArray[j - 1] = tempInt;
-      }
-    }
-  }
-
-  // spec says to take the 5th value, and we've sorted an ascending value
-  // TEST ME
-
-  double medianValue = currentPowerVals[channelIndexArray[4]];
-  double thresholdValue = medianValue * FUDGE_FACTOR;
-  double maxValue = currentPowerVals[9];
-  //printf("median value: %f, threshold value: %f, maxValue: %f\n", medianValue, thresholdValue, maxValue);
-
-  /*printf("contents of tempVals: ");
-  for (uint16_t i = 0; i < 10; i++) {
-    printf("%d,", channelIndexArray[i]);
-  }*/
-
-  /*intf("contents of currentPowerVals: ");
-  for (uint16_t i = 0; i < 10; i++) {
-    printf("%f,", currentPowerVals[i]);
-  }
-  printf("\n");*/
-
-  if ((maxValue > thresholdValue) && (!lockoutTimer_running())) {
-    //printf("Hit detected on Channel %d\n", (channelIndexArray[9] + 1));
-    lastChannelHit = channelIndexArray[9];
-    (detector_hitArray[lastChannelHit])++;
-    //printf("hit count for that player: %d;\n", detector_hitArray[lastChannelHit]);
-    for (uint8_t i = 0; i < 10; i++) {
-      printf("Player %d number of hits: %d\n", (i + 1), detector_hitArray[i]);
-    }
-    return true;
-  } else {
-    //printf("no Hit Detected\n");
-    return false;
-  }
+bool detector_hitDetected() 
+{
+  return detector_hitDetectedFlag;
 }
 
 // Returns the frequency number that caused the hit.
-uint16_t detector_getFrequencyNumberOfLastHit() {
-  // todo: check if last channel has been initialized, as we didn't want to init
-  // it to 0 so we left it hanging
+uint16_t detector_getFrequencyNumberOfLastHit() 
+{
   return lastChannelHit;
 }
 
 // Clear the detected hit once you have accounted for it.
-void detector_clearHit() { hitDetected = false; }
+void detector_clearHit() 
+{ 
+  detector_hitDetectedFlag = false;
+}
 
 // Ignore all hits. Used to provide some limited invincibility in some game
 // modes. The detector will ignore all hits if the flag is true, otherwise will
@@ -220,8 +261,10 @@ void detector_ignoreAllHits(bool flagValue) {}
 // Get the current hit counts.
 // Copy the current hit counts into the user-provided hitArray
 // using a for-loop.
-void detector_getHitCounts(detector_hitCount_t hitArray[]) {
-  for (uint16_t i = 0; i < 10; i++) {
+void detector_getHitCounts(detector_hitCount_t hitArray[]) 
+{
+  for(uint16_t i = FOR_LOOP_START_VALUE; i < NUM_FREQUENCIES; i++)
+  {
     hitArray[i] = detector_hitArray[i];
   }
 }
@@ -268,3 +311,23 @@ double detector_getScaledAdcValue(isr_AdcValue_t adcValue) {}
 // bool printTestMessages);
 
 detector_status_t detector_testAdcScaling() {}
+
+
+
+//resets Decimation Counter to zero
+void resetDecimationCounter()
+{
+  decimationCounter = DECIMATION_COUNTER_INITIAL_VALUE;
+}
+
+//increments decimation counter by 1
+void incrementDecimationCounter()
+{
+  decimationCounter++;
+}
+
+//returns whether decimation counter is complete
+bool decimationCounterComplete()
+{
+  return (decimationCounter >= DECIMATION_COUNTER_MAX);
+}
