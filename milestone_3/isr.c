@@ -146,6 +146,7 @@ uint32_t isr_adcBufferElementCount()
   return adcBuffer.elementCount;
 }
 
+//adcBuffer Init
 void adcBufferInit() 
 {
   //sets indexOut to zero
